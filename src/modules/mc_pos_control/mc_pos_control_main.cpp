@@ -54,7 +54,6 @@
 #include <px4_platform_common/posix.h>
 #include <px4_platform_common/tasks.h>
 #include <uORB/Publication.hpp>
-#include <uORB/PublicationQueued.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
 #include <uORB/topics/home_position.h>
@@ -122,7 +121,6 @@ private:
 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};	/**< vehicle land detected subscription */
 	uORB::Subscription _control_mode_sub{ORB_ID(vehicle_control_mode)};		/**< vehicle control mode subscription */
 	uORB::Subscription _parameter_update_sub{ORB_ID(parameter_update)};		/**< notification of parameter updates */
-	uORB::Subscription _att_sub{ORB_ID(vehicle_attitude)};				/**< vehicle attitude */
 	uORB::Subscription _home_pos_sub{ORB_ID(home_position)}; 			/**< home position */
 	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
 
@@ -151,12 +149,12 @@ private:
 		// Position Control
 		(ParamFloat<px4::params::MPC_XY_P>) _param_mpc_xy_p,
 		(ParamFloat<px4::params::MPC_Z_P>) _param_mpc_z_p,
-		(ParamFloat<px4::params::MPC_XY_VEL_P>) _param_mpc_xy_vel_p,
-		(ParamFloat<px4::params::MPC_XY_VEL_I>) _param_mpc_xy_vel_i,
-		(ParamFloat<px4::params::MPC_XY_VEL_D>) _param_mpc_xy_vel_d,
-		(ParamFloat<px4::params::MPC_Z_VEL_P>) _param_mpc_z_vel_p,
-		(ParamFloat<px4::params::MPC_Z_VEL_I>) _param_mpc_z_vel_i,
-		(ParamFloat<px4::params::MPC_Z_VEL_D>) _param_mpc_z_vel_d,
+		(ParamFloat<px4::params::MPC_XY_VEL_P_ACC>) _param_mpc_xy_vel_p_acc,
+		(ParamFloat<px4::params::MPC_XY_VEL_I_ACC>) _param_mpc_xy_vel_i_acc,
+		(ParamFloat<px4::params::MPC_XY_VEL_D_ACC>) _param_mpc_xy_vel_d_acc,
+		(ParamFloat<px4::params::MPC_Z_VEL_P_ACC>) _param_mpc_z_vel_p_acc,
+		(ParamFloat<px4::params::MPC_Z_VEL_I_ACC>) _param_mpc_z_vel_i_acc,
+		(ParamFloat<px4::params::MPC_Z_VEL_D_ACC>) _param_mpc_z_vel_d_acc,
 		(ParamFloat<px4::params::MPC_XY_VEL_MAX>) _param_mpc_xy_vel_max,
 		(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _param_mpc_z_vel_max_up,
 		(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _param_mpc_z_vel_max_dn,
@@ -284,7 +282,7 @@ private:
 MulticopterPositionControl::MulticopterPositionControl(bool vtol) :
 	SuperBlock(nullptr, "MPC"),
 	ModuleParams(nullptr),
-	WorkItem(MODULE_NAME, px4::wq_configurations::att_pos_ctrl),
+	WorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
 	_vehicle_attitude_setpoint_pub(vtol ? ORB_ID(mc_virtual_attitude_setpoint) : ORB_ID(vehicle_attitude_setpoint)),
 	_vel_x_deriv(this, "VELD"),
 	_vel_y_deriv(this, "VELD"),
@@ -318,8 +316,8 @@ MulticopterPositionControl::init()
 		return false;
 	}
 
-	// limit to every other vehicle_local_position update (~62.5 Hz)
-	_local_pos_sub.set_interval_us(16_ms);
+	// limit to every other vehicle_local_position update (50 Hz)
+	_local_pos_sub.set_interval_us(20_ms);
 
 	_time_stamp_last_loop = hrt_absolute_time();
 
@@ -363,9 +361,10 @@ MulticopterPositionControl::parameters_update(bool force)
 		}
 
 		_control.setPositionGains(Vector3f(_param_mpc_xy_p.get(), _param_mpc_xy_p.get(), _param_mpc_z_p.get()));
-		_control.setVelocityGains(Vector3f(_param_mpc_xy_vel_p.get(), _param_mpc_xy_vel_p.get(), _param_mpc_z_vel_p.get()),
-					  Vector3f(_param_mpc_xy_vel_i.get(), _param_mpc_xy_vel_i.get(), _param_mpc_z_vel_i.get()),
-					  Vector3f(_param_mpc_xy_vel_d.get(), _param_mpc_xy_vel_d.get(), _param_mpc_z_vel_d.get()));
+		_control.setVelocityGains(
+			Vector3f(_param_mpc_xy_vel_p_acc.get(), _param_mpc_xy_vel_p_acc.get(), _param_mpc_z_vel_p_acc.get()),
+			Vector3f(_param_mpc_xy_vel_i_acc.get(), _param_mpc_xy_vel_i_acc.get(), _param_mpc_z_vel_i_acc.get()),
+			Vector3f(_param_mpc_xy_vel_d_acc.get(), _param_mpc_xy_vel_d_acc.get(), _param_mpc_z_vel_d_acc.get()));
 		_control.setVelocityLimits(_param_mpc_xy_vel_max.get(), _param_mpc_z_vel_max_up.get(), _param_mpc_z_vel_max_dn.get());
 		_control.setThrustLimits(_param_mpc_thr_min.get(), _param_mpc_thr_max.get());
 		_control.setTiltLimit(M_DEG_TO_RAD_F * _param_mpc_tiltmax_air.get()); // convert to radians!
@@ -405,7 +404,7 @@ MulticopterPositionControl::parameters_update(bool force)
 		// set trigger time for takeoff delay
 		_takeoff.setSpoolupTime(_param_mpc_spoolup_time.get());
 		_takeoff.setTakeoffRampTime(_param_mpc_tko_ramp_t.get());
-		_takeoff.generateInitialRampValue(_param_mpc_thr_hover.get(), _param_mpc_z_vel_p.get());
+		_takeoff.generateInitialRampValue(_param_mpc_z_vel_p_acc.get());
 
 		if (_wv_controller != nullptr) {
 			_wv_controller->update_parameters();
@@ -423,19 +422,13 @@ MulticopterPositionControl::poll_subscriptions()
 	_control_mode_sub.update(&_control_mode);
 	_home_pos_sub.update(&_home_pos);
 
-	if (_att_sub.updated()) {
-		vehicle_attitude_s att;
-
-		if (_att_sub.copy(&att) && PX4_ISFINITE(att.q[0])) {
-			_states.yaw = Eulerf(Quatf(att.q)).psi();
-		}
-	}
-
 	if (_param_mpc_use_hte.get()) {
 		hover_thrust_estimate_s hte;
 
 		if (_hover_thrust_estimate_sub.update(&hte)) {
-			_control.updateHoverThrust(hte.hover_thrust);
+			if (hte.valid) {
+				_control.updateHoverThrust(hte.hover_thrust);
+			}
 		}
 	}
 }
@@ -511,6 +504,10 @@ MulticopterPositionControl::set_vehicle_states(const float &vel_sp_z)
 		_states.velocity(2) = _states.acceleration(2) = NAN;
 		// reset derivative to prevent acceleration spikes when regaining velocity
 		_vel_z_deriv.reset();
+	}
+
+	if (PX4_ISFINITE(_local_pos.heading)) {
+		_states.yaw = _local_pos.heading;
 	}
 }
 
@@ -616,6 +613,7 @@ MulticopterPositionControl::Run()
 			// limit tilt during takeoff ramupup
 			if (_takeoff.getTakeoffState() < TakeoffState::flight) {
 				constraints.tilt = math::radians(_param_mpc_tiltmax_lnd.get());
+				setpoint.acceleration[2] = NAN;
 			}
 
 			// limit altitude only if local position is valid

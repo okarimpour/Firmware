@@ -95,10 +95,10 @@ void UUVAttitudeControl::vehicle_control_mode_poll()
 void UUVAttitudeControl::manual_control_setpoint_poll()
 {
 	bool updated = false;
-	orb_check(_manual_control_sub, &updated);
+	orb_check(_manual_control_setpoint_sub, &updated);
 
 	if (updated) {
-		orb_copy(ORB_ID(manual_control_setpoint), _manual_control_sub, &_manual);
+		orb_copy(ORB_ID(manual_control_setpoint), _manual_control_setpoint_sub, &_manual_control_setpoint);
 	}
 }
 
@@ -110,6 +110,11 @@ void UUVAttitudeControl::vehicle_attitude_setpoint_poll()
 	if (updated) {
 		orb_copy(ORB_ID(vehicle_attitude_setpoint), _vehicle_attitude_sp_sub, &_vehicle_attitude_sp);
 	}
+}
+
+void UUVAttitudeControl::vehicle_rates_setpoint_poll()
+{
+	_vehicle_rates_setpoint_sub.update(&_vehicle_rates_sp);
 }
 
 
@@ -186,6 +191,10 @@ void UUVAttitudeControl::control_attitude_geo(const vehicle_attitude_s &att, con
 	float pitch_body = _vehicle_attitude_sp.pitch_body;
 	float yaw_body = _vehicle_attitude_sp.yaw_body;
 
+	float roll_rate_desired = _vehicle_rates_sp.roll;
+	float pitch_rate_desired = _vehicle_rates_sp.pitch;
+	float yaw_rate_desired = _vehicle_rates_sp.yaw;
+
 	/* get attitude setpoint rotational matrix */
 	Dcmf _rot_des = Eulerf(roll_body, pitch_body, yaw_body);
 
@@ -205,9 +214,9 @@ void UUVAttitudeControl::control_attitude_geo(const vehicle_attitude_s &att, con
 	e_R_vec(1) = e_R(0, 2);  /**< Pitch */
 	e_R_vec(2) = e_R(1, 0);  /**< Yaw   */
 
-	omega(0) = _angular_velocity.xyz[0] - 0.0f;
-	omega(1) = _angular_velocity.xyz[1] - 0.0f;
-	omega(2) = _angular_velocity.xyz[2] - 0.0f;
+	omega(0) = _angular_velocity.xyz[0] - roll_rate_desired;
+	omega(1) = _angular_velocity.xyz[1] - pitch_rate_desired;
+	omega(2) = _angular_velocity.xyz[2] - yaw_rate_desired;
 
 	/**< P-Control */
 	torques(0) = - e_R_vec(0) * _param_roll_p.get();	/**< Roll  */
@@ -235,7 +244,7 @@ void UUVAttitudeControl::control_attitude_geo(const vehicle_attitude_s &att, con
 	*/
 
 	// take thrust as
-	thrust_u = _param_direct_thrust.get();
+	thrust_u = _vehicle_attitude_sp.thrust_body[0];
 
 	constrain_actuator_commands(roll_u, pitch_u, yaw_u, thrust_u);
 	/* Geometric Controller END*/
@@ -250,7 +259,7 @@ void UUVAttitudeControl::run()
 	_local_pos_sub = orb_subscribe(ORB_ID(vehicle_local_position));
 	_vcontrol_mode_sub = orb_subscribe(ORB_ID(vehicle_control_mode));
 
-	_manual_control_sub = orb_subscribe(ORB_ID(manual_control_setpoint));
+	_manual_control_setpoint_sub = orb_subscribe(ORB_ID(manual_control_setpoint));
 
 	_sensor_combined_sub = orb_subscribe(ORB_ID(sensor_combined));
 
@@ -266,7 +275,7 @@ void UUVAttitudeControl::run()
 	/* Setup of loop */
 	fds[0].fd = _vehicle_attitude_sub;
 	fds[0].events = POLLIN;
-	fds[1].fd = _manual_control_sub;
+	fds[1].fd = _manual_control_setpoint_sub;
 	fds[1].events = POLLIN;
 	fds[2].fd = _sensor_combined_sub;
 	fds[2].events = POLLIN;
@@ -306,6 +315,7 @@ void UUVAttitudeControl::run()
 			orb_copy(ORB_ID(vehicle_local_position), _local_pos_sub, &_local_pos);
 
 			vehicle_attitude_setpoint_poll();
+			vehicle_rates_setpoint_poll();
 			vehicle_control_mode_poll();
 			manual_control_setpoint_poll();
 
@@ -337,11 +347,12 @@ void UUVAttitudeControl::run()
 		if (fds[1].revents & POLLIN) {
 			// This should be copied even if not in manual mode. Otherwise, the poll(...) call will keep
 			// returning immediately and this loop will eat up resources.
-			orb_copy(ORB_ID(manual_control_setpoint), _manual_control_sub, &_manual);
+			orb_copy(ORB_ID(manual_control_setpoint), _manual_control_setpoint_sub, &_manual_control_setpoint);
 
 			if (_vcontrol_mode.flag_control_manual_enabled && !_vcontrol_mode.flag_control_rates_enabled) {
 				/* manual/direct control */
-				constrain_actuator_commands(_manual.y, -_manual.x, _manual.r, _manual.z);
+				constrain_actuator_commands(_manual_control_setpoint.y, -_manual_control_setpoint.x,
+							    _manual_control_setpoint.r, _manual_control_setpoint.z);
 			}
 
 		}
@@ -363,7 +374,9 @@ void UUVAttitudeControl::run()
 	}
 
 	orb_unsubscribe(_vcontrol_mode_sub);
-	orb_unsubscribe(_manual_control_sub);
+	orb_unsubscribe(_vehicle_attitude_sp_sub);
+	orb_unsubscribe(_angular_velocity_sub);
+	orb_unsubscribe(_manual_control_setpoint_sub);
 	orb_unsubscribe(_vehicle_attitude_sub);
 	orb_unsubscribe(_local_pos_sub);
 	orb_unsubscribe(_sensor_combined_sub);

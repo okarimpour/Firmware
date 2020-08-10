@@ -42,24 +42,16 @@ bool FlightTaskTransition::updateInitialize()
 	return FlightTask::updateInitialize();
 }
 
-bool FlightTaskTransition::activate(vehicle_local_position_setpoint_s last_setpoint)
+bool FlightTaskTransition::activate(const vehicle_local_position_setpoint_s &last_setpoint)
 {
-	checkSetpoints(last_setpoint);
-	_transition_altitude = last_setpoint.z;
-	_transition_yaw = last_setpoint.yaw;
+	_transition_altitude = PX4_ISFINITE(last_setpoint.z) ? last_setpoint.z : _position(2);
+	_transition_yaw = PX4_ISFINITE(last_setpoint.yaw) ? last_setpoint.yaw : _yaw;
 	return FlightTask::activate(last_setpoint);
-}
-
-void FlightTaskTransition::checkSetpoints(vehicle_local_position_setpoint_s &setpoints)
-{
-	// If the setpoint is unknown, set to the current estimate
-	if (!PX4_ISFINITE(setpoints.z)) { setpoints.z = _position(2); }
-
-	if (!PX4_ISFINITE(setpoints.yaw)) { setpoints.yaw = _yaw; }
 }
 
 bool FlightTaskTransition::update()
 {
+	bool ret = FlightTask::update();
 	_acceleration_setpoint.xy() = matrix::Vector2f(0.f, 0.f);
 	// demand zero vertical velocity and level attitude
 	// tailsitters will override attitude and thrust setpoint
@@ -68,5 +60,5 @@ bool FlightTaskTransition::update()
 	_velocity_setpoint(2) = 0.0f;
 
 	_yaw_setpoint = NAN;
-	return true;
+	return ret;
 }
